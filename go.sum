@@ -7,3 +7,5 @@ golang.org/x/sys v0.0.0-20190412213103-97732733099d/go.mod h1:h1NjWce9XRLGQEsW7w
 golang.org/x/text v0.3.0/go.mod h1:NqM8EUOU14njkJ3fqMW+pc6Ldnwhi/IjpwHt7yyuwOQ=
 gopkg.in/square/go-jose.v1 v1.1.2 h1:/5jmADZB+RiKtZGr4HxsEFOEfbfsjTKsVnqpThUpE30=
 gopkg.in/square/go-jose.v1 v1.1.2/go.mod h1:QpYS+a4WhS+DTlyQIi6Ka7MS3SuR9a055rgXNEe6EiA=
+gopkg.in/square/go-jose.v2 v2.4.1 h1:H0TmLt7/KmzlrDOpa1F+zr0Tk90PbJYBfsVUmRLrf9Y=
+gopkg.in/square/go-jose.v2 v2.4.1/go.mod h1:M9dMgbHiYLoDGQrXy7OpJDJWiKiU//h+vD76mk0e1AI=

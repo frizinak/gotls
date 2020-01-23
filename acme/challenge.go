@@ -8,12 +8,9 @@ import (
 )
 
 const (
-	statusUnknown    = "unknown"
-	statusPending    = "pending"
-	statusProcessing = "processing"
-	statusInvalid    = "invalid"
-	statusRevoked    = "revoked"
-	statusValid      = "valid"
+	statusPending = "pending"
+	statusValid   = "valid"
+	statusReady   = "ready"
 )
 
 // Challenge represents an acme simpleHTTP challenge
@@ -40,7 +37,7 @@ func (c *Challenge) Create() error {
 		return err
 	}
 
-	if status != 202 {
+	if status != 200 {
 		return fmt.Errorf("Invalid response with status %d: %+v", status, resp)
 	}
 
@@ -56,8 +53,8 @@ func (c *Challenge) Poll() <-chan error {
 	go func() {
 		defer c.c.removeChallenge(c)
 		for {
-			resp := &authorizationResponse{}
-			status, err := c.c.get(c.authzURI, resp)
+			resp := &authChallenge{}
+			status, err := c.c.post(c.authzURI, nil, resp)
 			if status != 202 && status != 200 {
 				chn <- fmt.Errorf("Received status code %d: %+v", status, resp)
 				return
@@ -69,17 +66,13 @@ func (c *Challenge) Poll() <-chan error {
 			}
 
 			switch resp.Status {
+			case statusReady:
+				fallthrough
 			case statusValid:
 				chn <- nil
 				return
-			case statusUnknown:
-				// retry ?
 			case statusPending:
 				// retry
-			case statusRevoked:
-				fallthrough
-			case statusInvalid:
-				fallthrough
 			default:
 				chn <- errors.New(resp.Status)
 				return

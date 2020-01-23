@@ -12,12 +12,10 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
-	"time"
 
-	"gopkg.in/square/go-jose.v1"
+	"gopkg.in/square/go-jose.v2"
 )
 
 var errNotPKIXCert = errors.New("not a pkix certificate")
@@ -26,40 +24,51 @@ var errNotPKIXCert = errors.New("not a pkix certificate")
 type Client struct {
 	m          sync.RWMutex
 	thumbprint string
-	signer     jose.Signer
+	accountURL string
+	signingKey jose.SigningKey
 	nonce      string
 	dir        string
 	endpoints  *directory
 	challenges []*Challenge
+	finalize   string
 }
 
 // NewClient returns a new acme Client.
 func NewClient(dirURL string, accountKey *rsa.PrivateKey) (*Client, error) {
 	dirURL = strings.TrimRight(dirURL, "/")
-	signer, err := jose.NewSigner(jose.RS256, accountKey)
-	if err != nil {
-		return nil, err
-	}
 
-	thumb, err := (&jose.JsonWebKey{
+	thumb, err := (&jose.JSONWebKey{
 		Key:       accountKey.Public().(*rsa.PublicKey),
 		Algorithm: "RSA",
 	}).Thumbprint(crypto.SHA256)
-
 	if err != nil {
 		return nil, err
 	}
 
-	return &Client{
+	c := &Client{
 		thumbprint: base64.RawURLEncoding.EncodeToString(thumb),
-		signer:     signer,
 		dir:        dirURL,
 		challenges: make([]*Challenge, 0),
-	}, nil
+		signingKey: jose.SigningKey{Algorithm: jose.RS256, Key: accountKey},
+	}
+
+	return c, nil
 }
 
 // Nonce returns the last nonce, exported to implement jose.NonceSource
 func (c *Client) Nonce() (string, error) {
+	if c.nonce == "" {
+		if err := c.getDir(false); err != nil {
+			return "", err
+		}
+
+		resp, err := http.DefaultClient.Head(c.endpoints.NewNonce)
+		if err != nil {
+			return "", err
+		}
+
+		c.setNonce(resp.Header.Get("Replay-Nonce"))
+	}
 	return c.nonce, nil
 }
 
@@ -67,8 +76,9 @@ func (c *Client) setNonce(n string) {
 	c.nonce = n
 }
 
-func (c *Client) resetNonce() {
+func (c *Client) resetState() {
 	c.nonce = ""
+	c.accountURL = ""
 	c.endpoints = nil
 }
 
@@ -126,13 +136,16 @@ func (c *Client) removeChallenge(challenge *Challenge) {
 	c.challenges = c.challenges[:len(c.challenges)-1]
 }
 
-func (c *Client) marshal(msg interface{}) (string, error) {
-	r, err := json.Marshal(msg)
-	if err != nil {
-		return "", err
+func (c *Client) marshal(url string, msg interface{}) (string, error) {
+	r := []byte{}
+	if msg != nil {
+		var err error
+		r, err = json.Marshal(msg)
+		if err != nil {
+			return "", err
+		}
 	}
-
-	return c.sign(r)
+	return c.sign(url, r)
 }
 
 func (c *Client) getDir(force bool) error {
@@ -294,7 +307,7 @@ func (c *Client) post(url string, msg interface{}, response response) (int, erro
 }
 
 func (c *Client) postWithResponse(url string, msg interface{}) (*http.Response, error) {
-	signed, err := c.marshal(msg)
+	signed, err := c.marshal(url, msg)
 	if err != nil {
 		return nil, err
 	}
@@ -364,9 +377,21 @@ func (c *Client) get(url string, response response) (int, error) {
 	return resp.StatusCode, nil
 }
 
-func (c *Client) sign(msg []byte) (string, error) {
-	c.signer.SetNonceSource(c)
-	r, err := c.signer.Sign(msg)
+func (c *Client) sign(url string, msg []byte) (string, error) {
+	headers := map[jose.HeaderKey]interface{}{"url": url}
+	if c.accountURL != "" {
+		headers["kid"] = c.accountURL
+	}
+	signer, err := jose.NewSigner(
+		c.signingKey,
+		&jose.SignerOptions{
+			NonceSource:  c,
+			EmbedJWK:     c.accountURL == "",
+			ExtraHeaders: headers,
+		},
+	)
+
+	r, err := signer.Sign(msg)
 	if err != nil {
 		return "", err
 	}
@@ -378,31 +403,19 @@ func (c *Client) sign(msg []byte) (string, error) {
 // If an account already exists or was successfully created,
 // no error will be returned.
 func (c *Client) Register(contact []string) error {
-	req := &registration{"new-reg", contact, ""}
-	resp := &registrationResponse{}
 	if err := c.getDir(false); err != nil {
 		return err
 	}
 
+	req := &registration{contact, true}
+	resp := &registrationResponse{}
 	status, err := c.post(c.endpoints.NewReg, req, resp)
 	if err != nil {
 		return err
 	}
 
-	if status == 201 {
-		if resp.Agreement != "" {
-			req.Resource = "reg"
-			req.Agreement = resp.Agreement
-			_, err = c.post(resp.Location, req, resp)
-			if err != nil {
-				return err
-			}
-		}
-
-		return nil
-	}
-
-	if status == 409 {
+	c.accountURL = resp.Location
+	if status == 200 || status == 201 {
 		return nil
 	}
 
@@ -411,10 +424,9 @@ func (c *Client) Register(contact []string) error {
 
 // Authorize sends an authorize request and returns a simpleHTTP challenge,
 // which can be Created and Polled.
-func (c *Client) Authorize(domain string) (*Challenge, error) {
+func (c *Client) Authorize(domain string) ([]*Challenge, error) {
 	req := &authorization{
-		"new-authz",
-		authIdentifier{Type: "dns", Value: domain},
+		[]authIdentifier{authIdentifier{Type: "dns", Value: domain}},
 	}
 
 	resp := &authorizationResponse{}
@@ -431,30 +443,43 @@ func (c *Client) Authorize(domain string) (*Challenge, error) {
 		return nil, fmt.Errorf("Failed to create auth request with json: %+v", resp)
 	}
 
-	for _, i := range resp.Challenges {
-		if i.Type == "http-01" {
-			ch := &Challenge{
-				challengeURI: i.URI,
-				authzURI:     resp.Location,
-				token:        i.Token,
-				challenge: challenge{
-					Resource: "challenge",
-					Type:     "simpleHttp",
-					KeyAuthorization: fmt.Sprintf(
-						"%s.%s",
-						i.Token,
-						c.thumbprint,
-					),
-				},
-				c: c,
-			}
-
-			c.m.Lock()
-			defer c.m.Unlock()
-			c.challenges = append(c.challenges, ch)
-
-			return ch, nil
+	c.finalize = resp.Finalize
+	chs := make([]*Challenge, 0, 1)
+	for _, i := range resp.Authorizations {
+		cResp := &challengeResponse{}
+		_, err := c.post(i, nil, cResp)
+		if err != nil {
+			return nil, err
 		}
+		for _, chall := range cResp.Challenges {
+			if chall.Type == "http-01" {
+				ch := &Challenge{
+					challengeURI: chall.URI,
+					authzURI:     resp.Location,
+					token:        chall.Token,
+					challenge: challenge{
+						Type: "simpleHttp",
+						KeyAuthorization: fmt.Sprintf(
+							"%s.%s",
+							chall.Token,
+							c.thumbprint,
+						),
+					},
+					c: c,
+				}
+				if err != nil {
+					return nil, err
+				}
+				c.m.Lock()
+				defer c.m.Unlock()
+				c.challenges = append(c.challenges, ch)
+				chs = append(chs, ch)
+			}
+		}
+	}
+
+	if len(chs) != 0 {
+		return chs, nil
 	}
 
 	return nil, fmt.Errorf("No supported challenges found in: %+v", resp)
@@ -467,54 +492,29 @@ func (c *Client) Cert(csr []byte) (certificate []byte, err error) {
 	}
 
 	csrBase64 := base64.RawURLEncoding.EncodeToString(csr)
-	req := &cert{"new-cert", csrBase64}
-	resp, err := c.postWithResponse(c.endpoints.NewCert, req)
-	if resp != nil {
-		defer resp.Body.Close()
-	}
-
+	req := &cert{csrBase64}
+	auth := &authorizationResponse{}
+	_, err = c.post(c.finalize, req, auth)
 	if err != nil {
 		return nil, err
 	}
 
-	var location string
-	for {
-		certificate, err = ioutil.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
+	if auth.Certificate == "" {
+		return nil, errors.New("empty certificate, not all challenges complete?")
+	}
 
-		if resp.StatusCode != 201 && resp.StatusCode != 202 {
-			return nil, fmt.Errorf("Invalid http status code: %d: %s", resp.StatusCode, string(certificate))
-		}
+	resp, err := c.postWithResponse(auth.Certificate, nil)
+	if err != nil {
+		return nil, err
+	}
+	certificate, err = ioutil.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
 
-		if len(certificate) != 0 {
-			return certificate, nil
-		}
-
-		if location == "" {
-			location = resp.Header.Get("Location")
-			if location == "" {
-				return nil, fmt.Errorf("No certificate location provided")
-			}
-		}
-
-		_retry := resp.Header.Get("Retry-After")
-		retry, rerr := strconv.Atoi(_retry)
-		if rerr != nil || retry < 1 {
-			retry = 2
-		}
-
-		time.Sleep(time.Duration(retry) * time.Second)
-		resp, err = c.getWithResponse(location, "")
-		if err != nil {
-			if resp != nil {
-				resp.Body.Close()
-			}
-
-			break
-		}
+	if resp.StatusCode != 200 && resp.StatusCode != 201 && resp.StatusCode != 202 {
+		return nil, fmt.Errorf("Invalid http status code: %d: %s", resp.StatusCode, string(certificate))
 	}
 
 	return certificate, err

@@ -5,6 +5,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -74,7 +75,6 @@ func Certify(
 	errOCSPTimeout := time.Second * 10
 
 	hasValidCert := false
-	//derPriv := x509.MarshalPKCS1PrivateKey(tlsKey)
 	derPriv, err := x509.MarshalECPrivateKey(tlsKey)
 	if err != nil {
 		return stop, err
@@ -121,9 +121,8 @@ func Certify(
 		certificate, err = c.der2ocsp([][]byte{cache}, derPriv)
 
 		hasValidCert = !forceNewCert && err == nil
-
 		now := time.Now()
-		if !forceNewCert && expires.After(now) {
+		if hasValidCert && expires.After(now) {
 			var cert *tls.Certificate
 			if certificate != nil {
 				cert = certificate.Certificate
@@ -138,49 +137,24 @@ func Certify(
 		}
 	}
 
-	if !hasValidCert {
-		if err := registerAndAuth(c, log, domains, contact, serveMux); err != nil {
-			return stop, err
-		}
-	}
-
+	c.Handle(serveMux)
+	waitIssue := time.After(timeout)
+	waitOCSP := time.After(ocspTimeout)
 	go func() {
 		for {
 			select {
 			case <-stop:
 				return
-			case <-time.After(timeout):
-				if timeout != 0 {
-					c.resetNonce()
-				}
+			case <-waitIssue:
 				timeout = refreshTimeout
-
-				csr, err := GenerateCSR(tlsKey, domains[0], domains[1:])
-				if err != nil {
-					callback(nil, err)
-					continue
-				}
-
-				certBytes, err := c.Cert(csr)
-				if err != nil {
-					callback(nil, err)
-					continue
-				}
-
-				certificate, err := c.der2ocsp([][]byte{certBytes}, derPriv)
+				certificate, err = issue(c, log, domains, contact, tlsKey, derPriv, cacheFile)
 				var cert *tls.Certificate
 				if certificate != nil {
 					cert = certificate.Certificate
 				}
-
 				callback(cert, err)
-				if err == nil {
-					log.Println("New/renewed certificate")
-					if err := ioutil.WriteFile(cacheFile, certBytes, 0644); err != nil {
-						log.Printf("FAILED TO WRITE CERTIFICATE: %s", err.Error())
-					}
-				}
-			case <-time.After(ocspTimeout):
+				waitIssue = time.After(timeout)
+			case <-waitOCSP:
 				if certificate == nil {
 					continue
 				}
@@ -190,6 +164,7 @@ func Certify(
 					ocspTimeout = errOCSPTimeout
 					log.Printf("FAILED TO UPDATE OCSPStaple: %s", err.Error())
 				}
+				waitOCSP = time.After(ocspTimeout)
 			}
 		}
 	}()
@@ -197,39 +172,66 @@ func Certify(
 	return stop, nil
 }
 
-func registerAndAuth(
+func issue(
 	c *Client,
 	log *log.Logger,
 	domains []string,
 	contact []string,
-	mux *http.ServeMux,
-) error {
+	tlsKey *ecdsa.PrivateKey,
+	derPriv []byte,
+	cacheFile string,
+) (*ocspCertificate, error) {
+	c.resetState()
 	err := c.Register(contact)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	c.Handle(mux)
 
 	log.Println("Registered / authenticated")
 	for _, domain := range domains {
-		challenge, err := c.Authorize(domain)
+		challenges, err := c.Authorize(domain)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		log.Println("Requested challenges")
+		log.Println("Requested challenge(s)")
 
-		if err := challenge.Create(); err != nil {
-			return err
-		}
-
-		log.Println("Responded to challenge")
-		if err := <-challenge.Poll(); err != nil {
-			return fmt.Errorf("%s: Poll failed with err: %+v\n", domain, err)
+		for _, c := range challenges {
+			if err := c.Create(); err != nil {
+				return nil, err
+			}
 		}
 
-		log.Println("Beaten challenge")
+		log.Println("Responded to challenge(s)")
+		for _, c := range challenges {
+			if err := <-c.Poll(); err != nil {
+				return nil, fmt.Errorf("%s: Poll failed with err: %+v\n", domain, err)
+			}
+		}
+
+		log.Println("Beaten challenge(s)")
+	}
+	csr, err := GenerateCSR(tlsKey, domains[0], domains[1:])
+	if err != nil {
+		return nil, err
 	}
 
-	return nil
+	certPEMBytes, err := c.Cert(csr)
+	if err != nil {
+		return nil, err
+	}
+	pem, _ := pem.Decode(certPEMBytes)
+	if pem == nil {
+		return nil, errors.New("acme certificate could not be PEM decoded")
+	}
+	certBytes := pem.Bytes
+
+	certificate, err := c.der2ocsp([][]byte{certBytes}, derPriv)
+	if err == nil {
+		log.Println("New/renewed certificate")
+		if err := ioutil.WriteFile(cacheFile, certBytes, 0644); err != nil {
+			log.Printf("FAILED TO WRITE CERTIFICATE: %s", err.Error())
+		}
+	}
+
+	return certificate, err
 }
