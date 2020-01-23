@@ -347,36 +347,6 @@ func (c *Client) getWithResponse(url string, accept string) (*http.Response, err
 	return resp, err
 }
 
-func (c *Client) get(url string, response response) (int, error) {
-	resp, err := c.getWithResponse(url, "")
-	if resp != nil {
-		defer resp.Body.Close()
-	}
-
-	if err != nil {
-		if resp != nil {
-			return resp.StatusCode, err
-		}
-
-		return 0, err
-	}
-
-	if response != nil {
-		d := json.NewDecoder(resp.Body)
-		if err := d.Decode(response); err != nil {
-			return resp.StatusCode, err
-		}
-
-		for i := range resp.Header {
-			for j := range resp.Header[i] {
-				response.setHeader(i, resp.Header[i][j])
-			}
-		}
-	}
-
-	return resp.StatusCode, nil
-}
-
 func (c *Client) sign(url string, msg []byte) (string, error) {
 	headers := map[jose.HeaderKey]interface{}{"url": url}
 	if c.accountURL != "" {
@@ -390,6 +360,9 @@ func (c *Client) sign(url string, msg []byte) (string, error) {
 			ExtraHeaders: headers,
 		},
 	)
+	if err != nil {
+		return "", err
+	}
 
 	r, err := signer.Sign(msg)
 	if err != nil {

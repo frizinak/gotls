@@ -5,9 +5,8 @@ import (
 )
 
 type directory struct {
-	NewReg   string `json:"newAccount"` // new-reg
+	NewReg   string `json:"newAccount"`
 	NewAuthz string `json:"newOrder"`
-	NewCert  string `json:"new-cert"`
 	NewNonce string `json:"newNonce"`
 }
 
