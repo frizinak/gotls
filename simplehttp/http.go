@@ -154,7 +154,7 @@ func (s *Server) reqHandler(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request, cb HandleFunc) {
 	if s.gzipEnabled {
-		gz := &gzipWriter{ResponseWriter: w, r: r}
+		gz := &GZIPWriter{ResponseWriter: w, r: r}
 		defer gz.Close()
 		w = gz
 	}

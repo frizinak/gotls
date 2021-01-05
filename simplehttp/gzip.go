@@ -24,9 +24,9 @@ func AddGzipableContentType(contentType string) {
 	gzipable[contentType] = true
 }
 
-// gzipWriter will only gzip if the given response writer has a content-type
+// GZIPWriter will only gzip if the given response writer has a content-type
 // header that is in gzipable and the request has an accept-encoding: gzip header.
-type gzipWriter struct {
+type GZIPWriter struct {
 	sync.Mutex
 	http.ResponseWriter
 	r       *http.Request
@@ -34,19 +34,19 @@ type gzipWriter struct {
 	gz      io.WriteCloser
 }
 
-func (gz *gzipWriter) WriteHeader(status int) {
+func (gz *GZIPWriter) WriteHeader(status int) {
 	gz.Write(nil)
 	gz.ResponseWriter.WriteHeader(status)
 }
 
-func (gz *gzipWriter) Write(b []byte) (int, error) {
+func (gz *GZIPWriter) Write(b []byte) (int, error) {
 	gz.Lock()
 	defer gz.Unlock()
 	if !gz.written &&
 		strings.Contains(gz.r.Header.Get("Accept-Encoding"), "gzip") &&
 		gz.Header().Get("Content-Encoding") == "" {
-		if _, ok := gzipable[gz.Header().Get("Content-Type")]; ok {
-
+		ct := strings.SplitN(gz.Header().Get("Content-Type"), ";", 2)
+		if _, ok := gzipable[ct[0]]; ok {
 			gz.gz, _ = gzip.NewWriterLevel(gz.ResponseWriter, 2)
 			///gz.gz = gzip.NewWriter(gz.ResponseWriter)
 			gz.Header().Set("Content-Encoding", "gzip")
@@ -66,7 +66,7 @@ func (gz *gzipWriter) Write(b []byte) (int, error) {
 }
 
 // Close the writer (i.e. finish the gzip stream if there is one)
-func (gz *gzipWriter) Close() error {
+func (gz *GZIPWriter) Close() error {
 	gz.Lock()
 	defer gz.Unlock()
 	if gz.gz != nil {
