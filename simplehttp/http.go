@@ -93,6 +93,16 @@ func FromHTTPServer(
 	return s
 }
 
+// OverrideMux sets a new mux on the underlying http server.
+// Make sure to call one of the returned handlers
+func (s *Server) OverrideMux(mux http.Handler) (stdlib, direct http.Handler) {
+	stdlib = s.s.Handler
+	direct = http.HandlerFunc(s.reqHandler)
+	s.s.Handler = mux
+
+	return
+}
+
 // SetHeader adds a header to all future reponses.
 // Not thread safe.
 func (s *Server) SetHeader(name string, value string) {
