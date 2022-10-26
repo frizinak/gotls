@@ -15,6 +15,7 @@ var gzipable = map[string]bool{
 	"text/javascript":        true,
 	"application/json":       true,
 	"application/javascript": true,
+	"image/svg+xml":          true,
 }
 
 // AddGzipableContentType adds or overrides a content-type that will be
@@ -48,7 +49,6 @@ func (gz *GZIPWriter) Write(b []byte) (int, error) {
 		ct := strings.SplitN(gz.Header().Get("Content-Type"), ";", 2)
 		if _, ok := gzipable[ct[0]]; ok {
 			gz.gz, _ = gzip.NewWriterLevel(gz.ResponseWriter, 2)
-			///gz.gz = gzip.NewWriter(gz.ResponseWriter)
 			gz.Header().Set("Content-Encoding", "gzip")
 		}
 	}

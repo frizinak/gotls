@@ -19,8 +19,7 @@ type HandleFunc func(w http.ResponseWriter, r *http.Request, l *log.Logger) (err
 
 // Router decides which handleFunc should handle the given http.Request.
 // Returning no handler: 404.
-// Returning an errorStatus: HTTP <errorStatus>.
-type Router func(r *http.Request, l *log.Logger) (handler HandleFunc, errStatus int)
+type Router func(r *http.Request, l *log.Logger) (handler HandleFunc)
 
 // HTTPErrorHandler can write to an http.ResponseWriter
 type HTTPErrorHandler interface {
@@ -148,12 +147,7 @@ func (s *Server) SetHTTPErrorHandler(status int, handler HTTPErrorHandler) {
 }
 
 func (s *Server) reqHandler(w http.ResponseWriter, r *http.Request) {
-	handler, status := s.router(r, s.log)
-	if status != 0 {
-		s.serveError(w, status, nil)
-		return
-	}
-
+	handler := s.router(r, s.log)
 	if handler == nil {
 		s.serveError(w, http.StatusNotFound, nil)
 		return
